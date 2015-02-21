@@ -1,164 +1,240 @@
 # -*- coding: utf-8 -*-
-import re
-import requests
 import json
-import urllib
+import logging
+import pdb
+from bson import json_util
+from datetime import datetime
+from pycrunchbase import CrunchBase
 from pymongo import MongoClient
 from secrets import CRUNCHBASE_API_KEY
-from colors import bcolors
-from decimal import *
 
-# NOTES
-# obj = json.loads(json_string) 
-# print bcolors.HEADER + "Warning: No active frommets remain. Continue?" + bcolors.ENDC
-
-# List of top VC firms
-vc_firms = ["Angel Academe",
-            "Accel",
-            "KPCB",
-            "Sequoia",
-            "NEA",
-            "Andreessen Horowitz",
-            "Lightspeed",
-            "Benchmark",
-            "Bessemer",
-            "IVP",
-            "DFJ",
-            "Bain Capital Ventures",
-            "Union Square",
-            "Greylock",
-            "Khosla",
-            "Shasta",
-            "General Catalyst",
-            "Intel capital",
-            "Foundry Group",
-            "First Round",
-            "SV Angel",
-            "Google Ventures",
-            "SoftTech"]
-
-# For CrunchBase API access, add onto HTTP request as parameter
-payload = {'api_key' : CRUNCHBASE_API_KEY}
-good_count = 0
-bad_count = 0
-bad = []
-
-# Establish connections
+# Establish connections with database for writing.
 client = MongoClient('mongodb://localhost:27017/')
-db = client.amth160
-vcs = db.vcs
-companies = db.companies
+db = client.mgt535
+investors = db.investors
+cb = CrunchBase(CRUNCHBASE_API_KEY)
 
-def get_entity(namespace, permalink ):
-    req = requests.get("http://api.crunchbase.com/v/1/%s/%s.js" \
-            % (namespace, permalink), params=payload)
+# Get investors in this company along with investment round they invested in.
+def get_funding_rounds(company_permalink):
+    company = cb.organization(company_permalink)
+    total_raised = company.total_funding_usd
+    total_funding_rounds = company.data['relationships']['funding_rounds']['paging']['total_items']
+    funding_rounds = company.funding_rounds
+    if len(funding_rounds) < total_funding_rounds:
+        funding_rounds = cb.more(funding_rounds)
 
-    if req.status_code == 200:
-        print "\t\t[-] Got http://api.crunchbase.com/v/1/%s/%s.js" \
-                % (namespace, permalink)
-        try:
-            return json.loads(req.text)
-        except:
-            return None
-    else:
-        print "\t\t[-] %s: http://api.crunchbase.com/v/1/%s/%s.js" \
-                % (req.status_code, namespace, permalink)
-        return None
+    if not total_raised:
+        logging.warning('Couldn\'t get info on ' + company_permalink)
 
-def search(query, model):
-    safe_query = urllib.quote(query)  # Make query url-safe
+    all_funding_rounds = []
 
-    print "\t\t[-] Calling http://api.crunchbase.com/v/1/search.js?query=%s" \
-            % safe_query
-
-    req = requests.get("http://api.crunchbase.com/v/1/search.js?query=%s" \
-            % safe_query, params=payload)
-
-    if req.status_code == 200:
-        print "\t\t[-] Got http://api.crunchbase.com/v/1/search.js?query=%s" \
-                % safe_query
-
-        try:
-            res = json.loads(req.text)  # Convert string response into Python dictionary
-        except:
-            print req.text
-            return None
-
-
-        # Find the best match from result
-        permalink = None
-        namespace = None
-        for result in res['results']:
-            if result['namespace'] == model:
-                # Get permalink and namespace of top result
-                permalink = result['permalink']
-                namespace = result['namespace']
-                break
-
-        # No result found
-        if permalink is None:
-            print "\t\t[-] No results found."
-            return None
-
-        return get_entity(namespace, permalink)
-
-    else: 
-        print "\t\t[-] %s: http://api.crunchbase.com/v/1/search.js?query=%s" \
-                % (req.status_code, safe_query)
-        return None
-
-def scrape_vcs():
-    global vcs
-
-    print bcolors.PINK + "[>] Running MineBase scraper with %s firms..." \
-            % len(vc_firms) + bcolors.ENDC
-
-    for vc_firm in vc_firms:    # Iterate through VC firms
-        continue
-        if vcs.find_one({'name':re.compile(vc_firm)}):
-            print bcolors.YELLOW+ "\t[>] Skipping duplicate: %s" % vc_firm + bcolors.ENDC
-            continue
-
-        print bcolors.BLUE+ "\t[>] Attempting %s" % vc_firm + bcolors.ENDC
-
-        data = search(vc_firm, 'financial-organization')
-        if data is None:
-            print bcolors.RED + "\t\t[-] Failed to get %s" % vc_firm + bcolors.ENDC
-            bad_count += 1
-            bad.append(vc_firm)
-            continue
+    # Iterate through funding rounds
+    for funding_round in funding_rounds:
+        funding_round = cb.funding_round(funding_round.uuid)
+        round_label = funding_round.series
+        if round_label:
+            round_label = 'Series ' + round_label
         else:
-            if vcs.find_one({'name':data['name']}):
-                print bcolors.YELLOW+ "\t[>] Skipping duplicate: %s" % vc_firm + bcolors.ENDC
-                continue
-            good_count += 1
-            print "\t\t[+] Successfully got %s" % vc_firm 
-            vcs.insert(data)
-            print bcolors.GREEN + "\t\t[+] Successfully Inserted %s" \
-                    % vc_firm + bcolors.ENDC
+            round_label = funding_round.funding_type.capitalize()
 
-    if len(bad) > 0:
-        print bcolors.RED + "[>] Needs work..." + bcolors.ENDC
-        print bad
+        # Special case: Funding round has no named investors
+        # if 'investments' not in round_data['relationships']:
+        #     for _round in all_funding_rounds:
+        #         if _round['series'] == round_series:
+        #             _round['amount_raised'] = _round['amount_raised'] + \
+        #                     round_properties['money_raised_usd']
+        #     continue
+        # else:
+        #    round_investment = round_data['relationships']['investments']['items']
+
+        if not funding_round.investments:
+            logging.warning('No investments found in this round: ' + funding_round.permalink)
+
+        # Get date of investment round announcement
+        round_date = funding_round.announced_on
+        # round_date_code = funding_round.announced_on_trust_code
+        # round_date = get_date(round_date_code, round_date_raw)
+
+        if round_date is None:
+            logging.warning('Couldn\'t get info on ' + funding_round.permalink + \
+                    ' ' + round_label)
+            continue
+
+        payload = {
+            'date' : round_date,
+            'amount_raised' : funding_round.money_raised_usd,
+            'label' : round_label,
+            'investors' : []
+        }
+
+        # Iterate through individual investments in round, which constitute
+        # money invested by a single investor.
+        for investment in funding_round.investments:
+            # investor = investment['investor']
+            #
+            # if 'first_name' in investor and 'last_name' in investor:
+            #     investor_name = investor['first_name'] + ' ' + investor['last_name']
+            # elif 'name' in investor:
+            #     investor_name = investor['name']
+            # else:
+            #     pdb.set_trace()
+            #     investor_name = 'N/A'
+            #
+            # investor_permalink = investment['investor']['path']
+            payload['investors'].append(str(investment.investor))
+
+        # Update a round with more funding if the round already exists
+        did_update = False
+        for _round in all_funding_rounds:
+            if _round['label'] == payload['label']:
+                _round['amount_raised'] = _round['amount_raised'] + \
+                        payload['amount_raised']
+                _round['investors'].extend(payload['investors'])
+                if payload['date'] > _round['date']:
+                    _round['date'] = payload['date']
+                did_update = True
+
+        # Otherwise, add the new round
+        if not did_update:
+            all_funding_rounds.append(payload)
+
+    return all_funding_rounds
+
+def get_date(trust_code, date_raw):
+    if trust_code < 7:
+        return None
+    # elif trust_code == 6:
+    #     return datetime.strptime(date_raw, '%Y-%m-%d')
+    elif trust_code == 7:
+        return datetime.strptime(date_raw, '%Y-%m-%d')
+
+def main():
+    funding_rounds = None
+    for company_permalink in ['uber']:
+        funding_rounds = get_funding_rounds(company_permalink)
+
+    print json.dumps(funding_rounds, default=json_util.default)
+
+    pdb.set_trace()
+
+
+    return
+
+if __name__ == "__main__":
+    main()
+
+# Permalink names for billion-dollar startups as of February 2015
+billion_dollar_club = ['xiaomi',
+                        'uber',
+                        'palantir-technologies',
+                        'space-exploration-technologies',
+                        'flipkart',
+                        'airbnb',
+                        'dropbox',
+                        'snapchat',
+                        'theranos',
+                        'meituan-com',
+                        'square',
+                        'pinterest',
+                        'wework',
+                        'cloudera',
+                        'spotify',
+                        'stripe',
+                        'jawbone',
+                        'fanatics',
+                        'vancl',
+                        'legendary-entertainment',
+                        'pure-storage',
+                        'bloom-energy',
+                        'powa-technologies',
+                        'inmobi',
+                        'houzz',
+                        'dianping',
+                        'nutanix',
+                        'magic-leap',
+                        'snapdeal',
+                        'coupang',
+                        'instacart',
+                        'delivery-hero',
+                        'intarcia-therapeutics',
+                        'mongodb-inc',
+                        'docusign',
+                        'adyen',
+                        'koudai',
+                        'jasper-wireless',
+                        'deem',
+                        'social-finance',
+                        'sunrun',
+                        'appnexus',
+                        'automattic',
+                        'fab',
+                        'gilt-groupe',
+                        'tiny-speck',
+                        'actifio',
+                        'proteus-biomedical',
+                        'appdynamics',
+                        'ironsource',
+                        'home24-france',
+                        'yello-mobile',
+                        'cloudfare',
+                        'evernote',
+                        'good-technology',
+                        'eventbrite',
+                        'tango',
+                        'insidesales-com',
+                        'mogujie',
+                        'kabam',
+                        'lookout',
+                        'justfabulous',
+                        'the-honest-co',
+                        'credit-karma',
+                        'qualtrics',
+                        'razer',
+                        'shopify',
+                        'ani-technologies',
+                        'shazam-entertainment',
+                        'beibei',
+                        'grabtaxi',
+                        'moderna-therapeutics',
+                        'beats-by-dr-dre',
+                        'box',
+                        'coupons-com',
+                        'fisker',
+                        'gopro',
+                        'hortonworks',
+                        'jd-com',
+                        'lashou-com',
+                        'lending-club',
+                        'mobileye-vision-technologies',
+                        'nest-labs',
+                        'new-relic',
+                        'rocket-internet',
+                        'wayfair',
+                        'zalando'
+                        ]
+
+
+################################################################################
+
 
 def scrape_companies():
-    global vcs, companies 
+    global vcs, companies
 
     # Get list of all companies from VC firms
-    print bcolors.PINK + "[>] Getting list of companies in firms..." 
+    print bcolors.PINK + "[>] Getting list of companies in firms..."
     for vc_firm in vcs.find({}):
         continue
         startups = []
         investments = vc_firm['investments']
         for investment in investments:
-            company = investment['funding_round']['company'] 
+            company = investment['funding_round']['company']
             if (company['name'], company['permalink']) not in startups:
                 startups.append(company)
                 companies.update({'permalink': company['permalink']}, {'$set': company}, upsert=True)
 
         vcs.update({"_id": vc_firm["_id"]}, {"$set": {"startups": startups}})
 
-    print bcolors.PINK + "[>] Getting info about companies..." 
+    print bcolors.PINK + "[>] Getting info about companies..."
     # Get info about each company
     bad_companies = []
     for company in companies.find({}):
@@ -360,7 +436,7 @@ def export_matching():
         line = company['name'] + ', '
         for vc, startups in vc_startups.iteritems():
             if doOnce:
-                vcs_to_companies += vc + ', ' 
+                vcs_to_companies += vc + ', '
 
             if company['name'] in startups:
                 line += '1, '
@@ -373,16 +449,6 @@ def export_matching():
         vcs_to_companies += (line[:-2] + '\n')
         doOnce = False
     """
-        
+
     f = open('vcs_to_companies.csv', 'w+')
     f.write(vcs_to_companies.encode('utf-8'))
-    
-
-
-if __name__ == '__main__':
-
-    # scrape_vcs()
-    # scrape_companies()
-    export_companies_and_vcs()
-    export_matching()
-
