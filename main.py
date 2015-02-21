@@ -63,17 +63,6 @@ def get_funding_rounds(company_permalink):
         # Iterate through individual investments in round, which constitute
         # money invested by a single investor.
         for investment in funding_round.investments:
-            # investor = investment['investor']
-            #
-            # if 'first_name' in investor and 'last_name' in investor:
-            #     investor_name = investor['first_name'] + ' ' + investor['last_name']
-            # elif 'name' in investor:
-            #     investor_name = investor['name']
-            # else:
-            #     pdb.set_trace()
-            #     investor_name = 'N/A'
-            #
-            # investor_permalink = investment['investor']['path']
             payload['investors'].append(str(investment.investor))
 
         # Update a round with more funding if the round already exists
@@ -92,14 +81,6 @@ def get_funding_rounds(company_permalink):
             all_funding_rounds.append(payload)
 
     return all_funding_rounds
-
-def get_date(trust_code, date_raw):
-    if trust_code < 7:
-        return None
-    # elif trust_code == 6:
-    #     return datetime.strptime(date_raw, '%Y-%m-%d')
-    elif trust_code == 7:
-        return datetime.strptime(date_raw, '%Y-%m-%d')
 
 def main():
     funding_rounds = []
